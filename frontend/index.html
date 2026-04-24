@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NotebookLM PDF → Editable PPTX</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-slate-950 text-slate-100 min-h-screen">
+    <main class="max-w-6xl mx-auto p-6 space-y-6">
+      <header>
+        <h1 class="text-3xl font-bold">NotebookLM PDF → Editable PPTX</h1>
+        <p class="text-slate-300 mt-2">上傳 PDF，自動解析文字/圖片/形狀並輸出可編輯 PPTX。</p>
+      </header>
+
+      <section class="bg-slate-900 border border-slate-700 rounded-xl p-4 space-y-4">
+        <div id="dropZone" class="border-2 border-dashed border-slate-600 rounded-lg p-8 text-center cursor-pointer hover:border-cyan-400">
+          <p class="font-semibold">Drag & drop PDF here</p>
+          <p class="text-slate-400 text-sm">or click to upload</p>
+          <input id="pdfInput" type="file" accept="application/pdf" class="hidden" />
+        </div>
+
+        <div class="grid md:grid-cols-3 gap-4">
+          <label class="space-y-1">
+            <span class="text-sm">轉換模式</span>
+            <select id="mode" class="w-full bg-slate-800 border border-slate-600 rounded p-2">
+              <option value="maximum_editable">Maximum Editable Mode</option>
+              <option value="visual_fidelity">Visual Fidelity Mode</option>
+              <option value="hybrid_safe">Hybrid Safe Mode</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-3 text-sm">
+          <label><input type="checkbox" id="enable_ocr" class="mr-2" />啟用 OCR</label>
+          <label><input type="checkbox" id="enable_inpainting" class="mr-2" checked />啟用背景補洞</label>
+          <label><input type="checkbox" id="keep_reference_bg" class="mr-2" />保留完整頁面做參考底圖</label>
+          <label><input type="checkbox" id="merge_nearby_text" class="mr-2" checked />自動合併相近文字</label>
+          <label><input type="checkbox" id="split_icons" class="mr-2" checked />拆解 icon</label>
+          <label><input type="checkbox" id="prefer_fonts" class="mr-2" checked />優先還原字體</label>
+          <label><input type="checkbox" id="debug_report" class="mr-2" checked />輸出 debug report</label>
+        </div>
+
+        <button id="convertBtn" class="px-4 py-2 bg-cyan-500 rounded font-semibold text-slate-900 disabled:opacity-50" disabled>Convert</button>
+        <p id="fileInfo" class="text-slate-300 text-sm"></p>
+        <p id="status" class="text-sm"></p>
+      </section>
+
+      <section id="downloadSection" class="hidden bg-slate-900 border border-slate-700 rounded-xl p-4">
+        <h2 class="text-xl font-semibold mb-3">下載結果</h2>
+        <div class="flex flex-wrap gap-3 text-sm">
+          <a id="dlPptx" class="px-3 py-2 rounded bg-emerald-500 text-slate-900 font-semibold">下載 PPTX</a>
+          <a id="dlAssets" class="px-3 py-2 rounded bg-slate-700">下載素材包 ZIP</a>
+          <a id="dlReport" class="px-3 py-2 rounded bg-slate-700">下載解析報告 JSON</a>
+          <a id="dlErrors" class="px-3 py-2 rounded bg-slate-700">下載錯誤紀錄</a>
+        </div>
+      </section>
+
+      <section id="previewSection" class="hidden grid md:grid-cols-2 gap-4">
+        <div class="bg-slate-900 border border-slate-700 rounded-xl p-3">
+          <h3 class="font-semibold mb-2">Before (Original PDF Page 1)</h3>
+          <img id="beforeImg" class="w-full rounded border border-slate-700" alt="before" />
+        </div>
+        <div class="bg-slate-900 border border-slate-700 rounded-xl p-3">
+          <h3 class="font-semibold mb-2">After (Converted Layer Preview)</h3>
+          <img id="afterImg" class="w-full rounded border border-slate-700" alt="after" />
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const dropZone = document.getElementById('dropZone');
+      const input = document.getElementById('pdfInput');
+      const convertBtn = document.getElementById('convertBtn');
+      const fileInfo = document.getElementById('fileInfo');
+      const statusEl = document.getElementById('status');
+      let file = null;
+
+      dropZone.addEventListener('click', () => input.click());
+      dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('border-cyan-400'); });
+      dropZone.addEventListener('dragleave', () => dropZone.classList.remove('border-cyan-400'));
+      dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('border-cyan-400');
+        if (e.dataTransfer.files?.[0]) setFile(e.dataTransfer.files[0]);
+      });
+      input.addEventListener('change', (e) => {
+        if (e.target.files?.[0]) setFile(e.target.files[0]);
+      });
+
+      function setFile(f) {
+        if (f.type !== 'application/pdf') {
+          statusEl.textContent = '請上傳 PDF 檔案';
+          return;
+        }
+        file = f;
+        convertBtn.disabled = false;
+        fileInfo.textContent = `檔名: ${f.name} | 大小: ${(f.size / 1024 / 1024).toFixed(2)} MB`;
+        statusEl.textContent = '';
+      }
+
+      convertBtn.addEventListener('click', async () => {
+        if (!file) return;
+        convertBtn.disabled = true;
+        statusEl.textContent = '轉換中，請稍候...';
+
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('mode', document.getElementById('mode').value);
+        ['enable_ocr','enable_inpainting','keep_reference_bg','merge_nearby_text','split_icons','prefer_fonts','debug_report'].forEach((id) => {
+          fd.append(id, document.getElementById(id).checked);
+        });
+
+        try {
+          const res = await fetch('/api/convert', { method: 'POST', body: fd });
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          statusEl.textContent = `完成！共 ${data.pages} 頁`;
+
+          const base = `/api/jobs/${data.job_id}`;
+          document.getElementById('dlPptx').href = `${base}/download/pptx`;
+          document.getElementById('dlAssets').href = `${base}/download/assets`;
+          document.getElementById('dlReport').href = `${base}/download/report`;
+          document.getElementById('dlErrors').href = `${base}/download/errors`;
+          document.getElementById('downloadSection').classList.remove('hidden');
+
+          document.getElementById('beforeImg').src = `${base}/preview/before/1?t=${Date.now()}`;
+          document.getElementById('afterImg').src = `${base}/preview/after/1?t=${Date.now()}`;
+          document.getElementById('previewSection').classList.remove('hidden');
+        } catch (err) {
+          statusEl.textContent = `轉換失敗: ${err.message}`;
+        } finally {
+          convertBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
