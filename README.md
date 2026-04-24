@@ -1,29 +1,26 @@
-# PDF to Editable PPTX Converter
+# PDF to Editable PPTX Converter (Web App)
 
-A full-stack web app for converting NotebookLM-style presentation PDFs into **editable PPTX** files.
+把 NotebookLM 產生的簡報型 PDF 轉為 **可編輯 PPTX** 的網站應用程式。
 
-## Stack
+## 主要能力
 
-- Frontend: HTML + Tailwind + PDF.js (served by FastAPI)
+- 每頁 PDF → 一頁 PPTX slide
+- 拆解層級：背景 / 文字 / 圖片 / icon / shape
+- 3 種模式：Maximum Editable / Visual Fidelity / Hybrid Safe
+- 可選 OCR、背景補洞、相鄰文字合併
+- 下載：PPTX、素材包、Report JSON、IR JSON、Errors
+- 前端網頁提供拖拉上傳、即時 PDF 第一頁預覽、轉換後預覽
+
+## 技術棧
+
 - Backend: FastAPI
-- PDF parsing: PyMuPDF (`fitz`), optional `pdfplumber`
-- OCR: optional `pytesseract`
-- Imaging: Pillow, OpenCV (optional for inpainting)
-- PPTX generation: `python-pptx`
+- PDF parsing: PyMuPDF
+- OCR: pytesseract (optional)
+- Image processing: OpenCV + Pillow
+- PPTX generation: python-pptx
+- Frontend: HTML + Tailwind + PDF.js
 
-## Features
-
-- Drag/drop PDF upload
-- 3 conversion modes:
-  - Maximum Editable
-  - Visual Fidelity
-  - Hybrid Safe
-- Advanced options (OCR, background inpainting, reference slide image, icon split, font priority, debug report)
-- Conversion report (JSON)
-- Download generated PPTX, assets ZIP, report JSON, error log
-- Before/After preview
-
-## Run locally
+## 執行
 
 ```bash
 python -m venv .venv
@@ -32,20 +29,16 @@ pip install -r requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
-Open: http://localhost:8000
+開啟：`http://localhost:8000`
 
 ## API
 
-- `POST /api/convert` convert uploaded PDF to PPTX
-- `GET /api/jobs/{job_id}` job metadata
+- `POST /api/convert`
+- `GET /api/jobs/{job_id}`
 - `GET /api/jobs/{job_id}/download/pptx`
 - `GET /api/jobs/{job_id}/download/assets`
 - `GET /api/jobs/{job_id}/download/report`
+- `GET /api/jobs/{job_id}/download/ir`
 - `GET /api/jobs/{job_id}/download/errors`
 - `GET /api/jobs/{job_id}/preview/before/{page}`
 - `GET /api/jobs/{job_id}/preview/after/{page}`
-
-## Notes
-
-- This implementation favors editability first, with graceful fallback to image layers for complex vectors/backgrounds.
-- For best OCR results, install Tesseract on the host OS.

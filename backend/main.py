@@ -8,21 +8,43 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.models.ir import SlideIR
 from backend.services.background import reconstruct_background, render_after_preview
 from backend.services.pdf_parser import extract_ir
 from backend.services.ppt_builder import build_pptx
 from backend.utils.fs import ROOT, ensure_dir, write_json, zip_dir
 
 app = FastAPI(title="PDF to Editable PPTX Converter")
-
 JOBS: dict[str, dict] = {}
 
-app.mount("/app", StaticFiles(directory="frontend", html=True), name="frontend")
+app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 
 @app.get("/")
 def home():
     return FileResponse("frontend/index.html")
+
+
+def merge_text_blocks(slide: SlideIR, x_gap: float = 12, y_gap: float = 6) -> None:
+    texts = sorted([e for e in slide.elements if e.type == "text"], key=lambda e: (round(e.y, 1), e.x))
+    non_texts = [e for e in slide.elements if e.type != "text"]
+    if not texts:
+        return
+
+    merged = []
+    cursor = texts[0]
+    for nxt in texts[1:]:
+        same_line = abs(nxt.y - cursor.y) <= y_gap
+        near = abs((cursor.x + cursor.width) - nxt.x) <= x_gap
+        if same_line and near and (cursor.font_size == nxt.font_size):
+            cursor.text = f"{cursor.text} {nxt.text}".strip()
+            cursor.width = (nxt.x + nxt.width) - cursor.x
+            cursor.height = max(cursor.height, nxt.height)
+        else:
+            merged.append(cursor)
+            cursor = nxt
+    merged.append(cursor)
+    slide.elements = non_texts + merged
 
 
 @app.post("/api/convert")
@@ -37,18 +59,19 @@ async def convert(
     prefer_fonts: bool = Form(True),
     debug_report: bool = Form(True),
 ):
-    if not file.filename.lower().endswith(".pdf"):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF is supported")
+
+    if mode not in {"maximum_editable", "visual_fidelity", "hybrid_safe"}:
+        raise HTTPException(status_code=400, detail="Invalid mode")
 
     job_id = uuid.uuid4().hex[:12]
     job_dir = ensure_dir(ROOT / job_id)
     assets_dir = ensure_dir(job_dir / "assets")
     previews_dir = ensure_dir(job_dir / "previews")
 
-    pdf_path = job_dir / (file.filename or "input.pdf")
+    pdf_path = job_dir / file.filename
     pdf_path.write_bytes(await file.read())
-
-    errors: list[str] = []
 
     try:
         ir = extract_ir(
@@ -60,26 +83,23 @@ async def convert(
             prefer_fonts=prefer_fonts,
         )
 
-        if merge_nearby_text:
-            # Placeholder for NLP-based text merge; intentionally explicit in report.
-            ir.diagnostics["merge_nearby_text"] = "enabled_placeholder"
-
         for slide in ir.slides:
-            if mode == "hybrid_safe" or keep_reference_bg:
-                pass
-            reconstruct_background(slide, enable_inpainting and mode != "hybrid_safe")
+            if merge_nearby_text:
+                merge_text_blocks(slide)
 
-            before = Path(slide.background.path) if slide.background.path else None
-            if before and before.exists():
-                target = previews_dir / f"before_{slide.page_number}.png"
-                if before.resolve() != target.resolve():
-                    target.write_bytes(before.read_bytes())
+            if mode != "hybrid_safe" and not keep_reference_bg:
+                reconstruct_background(slide, enable_inpainting)
 
+            bg = Path(slide.background.path) if slide.background.path else None
+            if bg and bg.exists():
+                before_target = previews_dir / f"before_{slide.page_number}.png"
+                if bg.resolve() != before_target.resolve():
+                    before_target.write_bytes(bg.read_bytes())
             render_after_preview(slide, previews_dir / f"after_{slide.page_number}.png")
 
-        ir_json_path = job_dir / "ir.json"
+        ir_path = job_dir / "ir.json"
         report_path = job_dir / "report.json"
-        write_json(ir_json_path, ir.model_dump())
+        write_json(ir_path, ir.model_dump())
         write_json(
             report_path,
             {
@@ -95,11 +115,7 @@ async def convert(
                     "debug_report": debug_report,
                 },
                 "slides": [
-                    {
-                        "page": s.page_number,
-                        "size": [s.width, s.height],
-                        "elements": len(s.elements),
-                    }
+                    {"page": s.page_number, "size": [s.width, s.height], "elements": len(s.elements)}
                     for s in ir.slides
                 ],
                 "diagnostics": ir.diagnostics,
@@ -108,9 +124,8 @@ async def convert(
 
         pptx_path = build_pptx(ir, job_dir / "output.pptx")
         assets_zip_path = zip_dir(assets_dir, job_dir / "assets.zip")
-
         errors_path = job_dir / "errors.log"
-        errors_path.write_text("\n".join(errors), encoding="utf-8")
+        errors_path.write_text("", encoding="utf-8")
 
         JOBS[job_id] = {
             "job_id": job_id,
@@ -120,22 +135,26 @@ async def convert(
             "pptx": str(pptx_path),
             "assets": str(assets_zip_path),
             "report": str(report_path),
+            "ir": str(ir_path),
             "errors": str(errors_path),
         }
+        return JOBS[job_id]
     except Exception as exc:
-        error_trace = traceback.format_exc()
-        (job_dir / "errors.log").write_text(error_trace, encoding="utf-8")
+        trace = traceback.format_exc()
+        (job_dir / "errors.log").write_text(trace, encoding="utf-8")
         raise HTTPException(status_code=500, detail=f"convert failed: {exc}")
 
-    return JOBS[job_id]
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
 
 
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
-    data = JOBS.get(job_id)
-    if not data:
+    if job_id not in JOBS:
         raise HTTPException(status_code=404, detail="job not found")
-    return data
+    return JOBS[job_id]
 
 
 @app.get("/api/jobs/{job_id}/download/pptx")
@@ -153,6 +172,11 @@ def dl_report(job_id: str):
     return _download(job_id, "report", "application/json")
 
 
+@app.get("/api/jobs/{job_id}/download/ir")
+def dl_ir(job_id: str):
+    return _download(job_id, "ir", "application/json")
+
+
 @app.get("/api/jobs/{job_id}/download/errors")
 def dl_errors(job_id: str):
     return _download(job_id, "errors", "text/plain")
@@ -160,25 +184,24 @@ def dl_errors(job_id: str):
 
 @app.get("/api/jobs/{job_id}/preview/before/{page}")
 def preview_before(job_id: str, page: int):
-    p = ROOT / job_id / "previews" / f"before_{page}.png"
-    if not p.exists():
+    target = ROOT / job_id / "previews" / f"before_{page}.png"
+    if not target.exists():
         raise HTTPException(status_code=404, detail="preview not found")
-    return FileResponse(p)
+    return FileResponse(target)
 
 
 @app.get("/api/jobs/{job_id}/preview/after/{page}")
 def preview_after(job_id: str, page: int):
-    p = ROOT / job_id / "previews" / f"after_{page}.png"
-    if not p.exists():
+    target = ROOT / job_id / "previews" / f"after_{page}.png"
+    if not target.exists():
         raise HTTPException(status_code=404, detail="preview not found")
-    return FileResponse(p)
+    return FileResponse(target)
 
 
 def _download(job_id: str, key: str, media_type: str):
-    data = JOBS.get(job_id)
-    if not data:
+    if job_id not in JOBS:
         raise HTTPException(status_code=404, detail="job not found")
-    p = Path(data[key])
-    if not p.exists():
+    path = Path(JOBS[job_id][key])
+    if not path.exists():
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(p, media_type=media_type, filename=p.name)
+    return FileResponse(path, media_type=media_type, filename=path.name)
